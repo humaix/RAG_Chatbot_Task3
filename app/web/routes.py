@@ -5,7 +5,7 @@ from app.core.config import Config
 from app.brain.embedding import EmbeddingManager
 from app.brain.vector_store import VectorStore
 from app.brain.retriever import Retriever
-from app.brain.prompt import create_prompt
+from app.brain.prompt import create_prompt, create_general_prompt, create_rewrite_prompt
 from app.brain.llm import LLM
 from app.brain.query_router import QueryRouter
 from app.knowledge_base.chunker import DocumentChunker
@@ -48,6 +48,22 @@ def allowed_file(filename):
         .lower()
         in ALLOWED_EXTENSIONS
     )
+
+
+def rewrite_question(question, history_text):
+    if not history_text.strip():
+        return question
+    rewrite_template = create_rewrite_prompt()
+    rewrite_prompt = rewrite_template.invoke({
+        "history": history_text,
+        "question": question
+    })
+    rewritten = llm.generate(rewrite_prompt).strip()
+    if rewritten:
+        return rewritten
+    return question
+
+
 # HOME
 @web.route("/")
 def home():
@@ -69,37 +85,41 @@ def chat():
         return jsonify({
             "error": "Please enter a question."
         }), 400
+
+    history = conversation.get_history()
+    history_text = "\n".join(
+        f"{item['role']}: "
+        f"{item['message']}"
+        for item in history
+    )
+
     # QUERY ROUTING
     intent, intent_score = router.detect_intent(question)
-    # Casual/general questions
-    # should not trigger retrieval.
-    if (
-        intent == "general"
-        and intent_score >= 0.55
-    ):
-        answer = (
-            "Hello! How can I help you "
-            "with your documents?"
-        )
+
+    if intent == "general":
+        general_template = create_general_prompt()
+        general_prompt = general_template.invoke({
+            "history": history_text,
+            "question": question
+        })
+        answer = llm.generate(general_prompt)
+        conversation.add_message("User", question)
+        conversation.add_message("Assistant", answer)
         return jsonify({
             "answer": answer,
             "sources": []
         })
+
     # RETRIEVAL
     try:
+        search_query = rewrite_question(question, history_text)
+
         results = retriever.search(
-            question
+            search_query
         )
         context = "\n\n".join(
             document.page_content
             for document in results
-        )
-        # CONVERSATION HISTORY
-        history = conversation.get_history()
-        history_text = "\n".join(
-            f"{item['role']}: "
-            f"{item['message']}"
-            for item in history
         )
         # CREATE PROMPT
         prompt_template = create_prompt()
@@ -175,6 +195,13 @@ def upload():
         # Load only the uploaded file
         loader = DocumentLoader(str(UPLOAD_FOLDER))
         documents = loader.load_file(file_path)
+        # Normalize source paths
+        for doc in documents:
+            if "source" in doc.metadata:
+                doc.metadata["source"] = doc.metadata["source"].replace("\\", "/")
+        print("UPLOAD FILE:", file_path)
+        print("UPLOADED DOCUMENTS:", len(documents))
+        print("UPLOADED CHARACTERS:", sum(len(d.page_content) for d in documents))
         if not documents:
             file_path.unlink(missing_ok=True)
             return jsonify({
@@ -188,6 +215,11 @@ def upload():
         chunk_overlap = config.get("chunking","chunk_overlap")
         chunker = DocumentChunker(chunk_size,chunk_overlap)
         chunks = chunker.split_documents(documents)
+        # Ensure chunks also have normalized paths
+        for chunk in chunks:
+            if "source" in chunk.metadata:
+                chunk.metadata["source"] = chunk.metadata["source"].replace("\\", "/")
+        print("UPLOADED CHUNKS:", len(chunks))
         if not chunks:
             file_path.unlink(missing_ok=True)
             return jsonify({

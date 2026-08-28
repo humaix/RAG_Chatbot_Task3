@@ -18,7 +18,7 @@ chunking:
   chunk_overlap: 200
 
 retrieval:
-  top_k: 3
+  top_k: 5
 
 llm:
   model_name: "openai/gpt-oss-120b"

@@ -10,7 +10,6 @@ class Conversation:
             "role": role,
             "message": message
         })
-
         if len(self.history) > self.max_history * 2:
             self.history = self.history[-self.max_history * 2:]
 
